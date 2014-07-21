@@ -41,7 +41,10 @@ class UsageError(Exception):
   pass
 
 # A URL prefix from which to fetch AMI information
-AMI_PREFIX = "https://raw.github.com/mesos/spark-ec2/v2/ami-list"
+DEFAULT_SPARK_EC2_BRANCH = "mesos/spark-ec2/v3"  		#  This can be overridden by setting SPARK_EC2_BRANCH (e.g. export SPARK_EC2_BRANCH=wvkehoe/spark/HiveEnabled )
+RAWGITHUB_PREFIX = "https://raw.github.com"
+AMI_SUBDIR = "ami-list"
+#AMI_PREFIX = "https://raw.github.com/mesos/spark-ec2/v2/ami-list"
 
 # Configure and parse our command-line arguments
 def parse_args():
@@ -219,7 +222,12 @@ def get_spark_ami(opts):
     print >> stderr,\
         "Don't recognize %s, assuming type is pvm" % opts.instance_type
 
-  ami_path = "%s/%s/%s" % (AMI_PREFIX, opts.region, instance_type)
+  spark_ec2_branch = os.getenv('SPARK_EC2_BRANCH')
+  if spark_ec2_branch == None :
+    spark_ec2_branch = DEFAULT_SPARK_EC2_BRANCH
+
+  ami_path = "%s/%s/%s/%s/%s" % (RAWGITHUB_PREFIX, spark_ec2_branch, AMI_SUBDIR, opts.region, instance_type)
+  # ami_path = "%s/%s/%s" % (AMI_PREFIX, opts.region, instance_type)
   try:
     ami = urllib2.urlopen(ami_path).read().strip()
     print "Spark AMI: " + ami
@@ -453,7 +461,21 @@ def setup_cluster(conn, master_nodes, slave_nodes, opts, deploy_ssh_key):
 
   # NOTE: We should clone the repository before running deploy_files to
   # prevent ec2-variables.sh from being overwritten
-  ssh(master, opts, "rm -rf spark-ec2 && git clone https://github.com/mesos/spark-ec2.git -b v3")
+  spark_ec2_branch = os.getenv('SPARK_EC2_BRANCH')
+  if spark_ec2_branch == None :
+    spark_ec2_branch = DEFAULT_SPARK_EC2_BRANCH
+    
+  pos = spark_ec2_branch.rfind("/")
+  if pos == -1:
+    # This may not work on master branch (still need to figure out what the raw.github.com URL format is for the master branch)
+    git_cmd = "rm -rf spark-ec2 && git clone https://github.com/%s.git" % (spark_ec2_branch)
+  else:
+    base = spark_ec2_branch[:pos]
+    branch = spark_ec2_branch[pos+1:]
+    git_cmd = "rm -rf spark-ec2 && git clone https://github.com/%s.git -b %s" % (base, branch)
+
+  ssh(master, opts, git_cmd)
+  # ssh(master, opts, "rm -rf spark-ec2 && git clone https://github.com/mesos/spark-ec2.git -b v3")
 
   print "Deploying files to master..."
   deploy_files(conn, "deploy.generic", opts, master_nodes, slave_nodes, modules)
@@ -565,6 +587,11 @@ def deploy_files(conn, root_dir, opts, master_nodes, slave_nodes, modules):
     shark_v = ""
     modules = filter(lambda x: x != "shark", modules)
 
+  # Allow user to override url of spark distr tgz file
+  spark_custom_tgz = os.getenv('SPARK_CUSTOM_TGZ')
+  if spark_custom_tgz == None :
+    spark_custom_tgz = ""
+
   template_vars = {
     "master_list": '\n'.join([i.public_dns_name for i in master_nodes]),
     "active_master": active_master,
@@ -579,7 +606,8 @@ def deploy_files(conn, root_dir, opts, master_nodes, slave_nodes, modules):
     "shark_version": shark_v,
     "hadoop_major_version": opts.hadoop_major_version,
     "spark_worker_instances": "%d" % opts.worker_instances,
-    "spark_master_opts": opts.master_opts
+    "spark_master_opts": opts.master_opts,
+    "spark_custom_tgz": spark_custom_tgz
   }
 
   # Create a temp directory in which we will place all the files to be
